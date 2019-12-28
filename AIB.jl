@@ -74,6 +74,60 @@ end;
 
 # clamp!(::KnetArray{Float32,3}
 
+
+
+# convert from float array to rgb 8bit image
+function toimg(img, addmean=true)
+    fimg = convert(Array{Float32},img)   # size is (h,w,c,1)
+    println("toimg ",extrema(fimg))
+    fimg = reshape(fimg, size(fimg)[1:end-1])   # drop the last dimension
+    println("fimg size",size(fimg))
+    
+    if addmean
+        im_mean = Array{Float32}(averageImage ./ 255)
+        im_mean = [0.5f0, 0.5f0, 0.5f0]   # simplify. The means are 0.485,0.457,0.407
+        img_normalize!(fimg, -1*im_mean)
+        println("toimg addmean ",extrema(fimg))
+    end
+    
+    clamp!(fimg, 0.f0,1.f0)
+    #map(clamp01nan, img)  in imagemagick
+    img1 = Array{FixedPointNumbers.Normed{UInt8,8}}(fimg) # size (h,w,3)
+    println("size(img1)",size(img1))
+    # convert to RGB image object. size(h,w) 
+    #img = colorview(RGB, permutedims(img, [1,2,3])) 
+    img2 = colorview(RGB, permutedims(img1, [3,1,2]))  # because incoming size is h,w,3
+    # resulting size is (h,w) with RGB type 
+    #println("...toimg ",extrema(img2))
+end
+
+# convert from rgb int image to float array
+# the data range differs slightly from the result of imagenet.imgdata(), not sure why.
+# Maybe the order of averageImage is backward? See the "permuteddims(macfix)" code in imgdata().
+# However fromimg/toimg are a round trip up to floating point
+# For now, use imagenet.imgdata() to load images from disk, and use these routines subsequently.
+function fromimg(img, demean=true) 
+    # img: size (h,w) type RGB
+    img1 = channelview(img)  # size (3,h,w)
+    img2 = permutedims(channelview(img1),[2,3,1])  # size (w,h,3)
+    fimg1 = convert(Array{Float32},img2)	# size (h,w,3),  typeof Array{Float32,3}
+    println("fromimg ",extrema(fimg1))
+    println("fimg1 size",size(fimg1))
+    
+    if demean
+        im_mean = Array{Float32}(averageImage ./ 255)
+        im_mean = [0.5f0, 0.5f0, 0.5f0]
+        img_normalize!(fimg1, im_mean)
+        println("toimg addmean ",extrema(fimg1))        
+    end
+    
+    fimg = reshape(fimg1, size(fimg1,1), size(fimg1,2), size(fimg1,3), 1) # add singleton dim
+    println("...fromimg ",extrema(fimg))
+    convert(dtype,fimg)  # back to knetarray
+end
+
+
+
 """
     Converts an image tensor into image object stored in CPU.
     Input:
@@ -82,8 +136,8 @@ end;
     Returns:
     -img2: image object (to be displayed or saved)
 """
-function postprocess(img1)
-    img = convert(Array{Float32},img1)  # convert from KnetArray
+function Xpostprocess(img1)
+    img = convert(Array{Float32},img1)  # convert from KnetArray, shape is (H,W,C,1)
     img = reshape(img, (size(img)...,)[1:end-1])      #shape is [H,W,C]
     println("postprocess size(img)=",size(img))
     #Denormalize the image tensor by adding the network mean
@@ -95,17 +149,47 @@ function postprocess(img1)
     println("postprocess img after normalize ",minimum(img),"..",maximum(img))
     #clamp the tensor so that it becomes a valid image object
     clamp!(img, 0.f0,1.f0)
-    #map(clamp01nan, img)  in imagemagick
+    #map(clamp01nan, img)  in imagemagick or Images
     img = Array{FixedPointNumbers.Normed{UInt8,8}}(img)
     img2 = colorview(RGB, permutedims(img, [3,1,2])) #convert to RGB image object. shape is [C,H,W]
     return img2
 end;
 
+function imgclamp(img)
+    img1 = convert(Array{Float32},img)
+    img1 = clamp.(img1, -0.5f0, 0.5f0)
+    img = convert(KnetArray{Float32},img1)
+    img = Param(img)
+    return img
+end
+
+# todo some faster / blas / parallelizable way?
+#  20.484436 seconds (14.47 M allocations: 437.874 MiB, 0.34% gc time)
+# probably is pulling back to cpu 
+function imgclamp!(img)
+    println("before clamp, img ",minimum(img),"...",maximum(img))
+    dims = size(img)
+    @assert dims[4]==1
+    len = reduce(*,dims)
+    #rintln("len = ",len)
+    @inbounds for i=1:len
+        v = img[i]
+        if v > 0.5f0   
+            img[i] = 0.5f0 
+        elseif v < -0.5f0
+            img[i] = -0.5f0
+        end
+    end
+    println("after clamp, img ",minimum(img),"...",maximum(img))
+end
+
 #image = randn(180,240,3,1)
-    averageImage = convert(Array{Float32},vgg["meta"]["normalization"]["averageImage"]);
-    image = imgdata("cat.jpg", averageImage) ./ 255; # Array{Float32,4} (h,w,3,1)
+    averageImage = convert(Array{Float32},vgg["meta"]["normalization"]["averageImage"])
+    println("averageImage=",averageImage)
+    image = imgdata("cat.jpg", averageImage) ./ 255; # Array{Float32,4} (h,w,3,1) WITH MEAN REMOVED
     image = convert(dtype, image);  # KnetArray{Float32,4}
     imgdisp = postprocess(image) #Base.ReshapedArray{RGB{Normed{UInt8,8}},2,Base.ReinterpretArray{RGB{Normed{UInt8,8}},3,Normed{UInt8,8},Array{Normed{UInt8,8},3}},Tuple{}}
+    imgdisp = toimg(image) #Base.ReshapedArray{RGB{Normed{UInt8,8}},2,Base.ReinterpretArray{RGB{Normed{UInt8,8}},3,Normed{UInt8,8},Array{Normed{UInt8,8},3}},Tuple{}}
     display(imgdisp)
 #image = image .- 0.5
 
@@ -349,33 +433,6 @@ function loss(img)
         theloss -= sum(relu .* relu)
     end
     theloss
-end
-
-function imgclamp(img)
-    img1 = convert(Array{Float32},img)
-    img1 = clamp.(img1, -0.5f0, 0.5f0)
-    img = convert(KnetArray{Float32},img1)
-    img = Param(img)
-    return img
-end
-
-# todo some faster / blas / parallelizable way?
-#  20.484436 seconds (14.47 M allocations: 437.874 MiB, 0.34% gc time)
-function imgclamp!(img)
-    println("before clamp, img ",minimum(img),"...",maximum(img))
-    dims = size(img)
-    @assert dims[4]==1
-    len = reduce(*,dims)
-    #rintln("len = ",len)
-    @inbounds for i=1:len
-        v = img[i]
-        if v > 0.5f0   
-            img[i] = 0.5f0 
-        elseif v < -0.5f0
-            img[i] = -0.5f0
-        end
-    end
-    println("after clamp, img ",minimum(img),"...",maximum(img))
 end
 
 # redefine non-verbose version
