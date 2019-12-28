@@ -66,7 +66,7 @@ Dict{String,Any} with 9 entries:
 """
 function img_normalize!(img, model_mean)
     for i in 1:size(img, 3)
-        println("img_normalize model_mean[i]=",model_mean[i])
+        #println("img_normalize model_mean[i]=",model_mean[i])
         img[:,:,i] = (img[:,:,i] .- model_mean[i])
     end
     return img
@@ -81,7 +81,7 @@ function toimg(img, addmean=true)
     fimg = convert(Array{Float32},img)   # size is (h,w,c,1)
     println("toimg ",extrema(fimg))
     fimg = reshape(fimg, size(fimg)[1:end-1])   # drop the last dimension
-    println("fimg size",size(fimg))
+    #println("fimg size",size(fimg))
     
     if addmean
         im_mean = Array{Float32}(averageImage ./ 255)
@@ -93,7 +93,7 @@ function toimg(img, addmean=true)
     clamp!(fimg, 0.f0,1.f0)
     #map(clamp01nan, img)  in imagemagick
     img1 = Array{FixedPointNumbers.Normed{UInt8,8}}(fimg) # size (h,w,3)
-    println("size(img1)",size(img1))
+    #println("size(img1)",size(img1))
     # convert to RGB image object. size(h,w) 
     #img = colorview(RGB, permutedims(img, [1,2,3])) 
     img2 = colorview(RGB, permutedims(img1, [3,1,2]))  # because incoming size is h,w,3
@@ -112,7 +112,7 @@ function fromimg(img, demean=true)
     img2 = permutedims(channelview(img1),[2,3,1])  # size (w,h,3)
     fimg1 = convert(Array{Float32},img2)	# size (h,w,3),  typeof Array{Float32,3}
     println("fromimg ",extrema(fimg1))
-    println("fimg1 size",size(fimg1))
+    #println("fimg1 size",size(fimg1))
     
     if demean
         im_mean = Array{Float32}(averageImage ./ 255)
@@ -155,40 +155,12 @@ function Xpostprocess(img1)
     return img2
 end;
 
-function imgclamp(img)
-    img1 = convert(Array{Float32},img)
-    img1 = clamp.(img1, -0.5f0, 0.5f0)
-    img = convert(KnetArray{Float32},img1)
-    img = Param(img)
-    return img
-end
-
-# todo some faster / blas / parallelizable way?
-#  20.484436 seconds (14.47 M allocations: 437.874 MiB, 0.34% gc time)
-# probably is pulling back to cpu 
-function imgclamp!(img)
-    println("before clamp, img ",minimum(img),"...",maximum(img))
-    dims = size(img)
-    @assert dims[4]==1
-    len = reduce(*,dims)
-    #rintln("len = ",len)
-    @inbounds for i=1:len
-        v = img[i]
-        if v > 0.5f0   
-            img[i] = 0.5f0 
-        elseif v < -0.5f0
-            img[i] = -0.5f0
-        end
-    end
-    println("after clamp, img ",minimum(img),"...",maximum(img))
-end
-
 #image = randn(180,240,3,1)
     averageImage = convert(Array{Float32},vgg["meta"]["normalization"]["averageImage"])
     println("averageImage=",averageImage)
     image = imgdata("cat.jpg", averageImage) ./ 255; # Array{Float32,4} (h,w,3,1) WITH MEAN REMOVED
     image = convert(dtype, image);  # KnetArray{Float32,4}
-    imgdisp = postprocess(image) #Base.ReshapedArray{RGB{Normed{UInt8,8}},2,Base.ReinterpretArray{RGB{Normed{UInt8,8}},3,Normed{UInt8,8},Array{Normed{UInt8,8},3}},Tuple{}}
+    #imgdisp = postprocess(image) #Base.ReshapedArray{RGB{Normed{UInt8,8}},2,Base.ReinterpretArray{RGB{Normed{UInt8,8}},3,Normed{UInt8,8},Array{Normed{UInt8,8},3}},Tuple{}}
     imgdisp = toimg(image) #Base.ReshapedArray{RGB{Normed{UInt8,8}},2,Base.ReinterpretArray{RGB{Normed{UInt8,8}},3,Normed{UInt8,8},Array{Normed{UInt8,8},3}},Tuple{}}
     display(imgdisp)
 #image = image .- 0.5
@@ -438,31 +410,43 @@ end
 # redefine non-verbose version
 convx(x,w) = conv4(w[1], x; padding=1, mode=1) .+ w[2]
 
-img = copy(image)     # image is original, img is evolved
-img = dtype(randn(size(image)))  #gaussian noise (mean:0, var:1)
-img = dtype(randn(600,600,3,1))
-img = Param(img)
-imgdisp = postprocess(img)
+gBlur = 10
+
+fimg = copy(image)     # image is original, img is evolved
+fimg = dtype(randn(size(image)))  #gaussian noise (mean:0, var:1)
+fimg = dtype(randn(400,400,3,1))
+#fimg = Param(fimg)
+imgdisp = toimg(fimg)
 display(imgdisp)
 
-for iter=1:500
+for iter=1:50
     println("iteration ",iter)
-    dloss = @diff loss(img)
-    g = grad(dloss,img)
+    fimg = Param(fimg)
+    dloss = @diff loss(fimg)
+    g = grad(dloss,fimg)
     #Base.axpy!(-0.01, g, img)
     #@. img += -0.0001 * g
-    img .+= -0.000005f0 * g
+    fimg .+= -0.000005f0 * g
     #img = clamp.(img, -0.5f0, 0.5f0)
-    img = imgclamp(img)
+    
+    iimg = toimg(fimg)  # clamps it
+    if iter%gBlur == 0
+        println("blurring")
+        iimg = imfilter(iimg, Kernel.gaussian(3));
+        # todo re-expand also
+    end
+    fimg = fromimg(iimg)
+    
+    #img = imgclamp(img)
     
     if (iter-1)%5 == 0
-        println("typeof(img)=",typeof(img)," typeof g=",typeof(g))
-        println("img in ",minimum(img),"..",maximum(img), "  g in ", minimum(g),"..",maximum(g))
-        display(postprocess(img))
+        println("typeof(img)=",typeof(fimg)," typeof g=",typeof(g))
+        println("img in ",minimum(fimg),"..",maximum(fimg), "  g in ", minimum(g),"..",maximum(g)) # todo extrema not defined for knetarray
+        display(toimg(fimg))
         #map(clamp01nan, img)
-        save(@sprintf("_output.%04d.jpg",iter),postprocess(img))
+        save(@sprintf("_output.%04d.jpg",iter),toimg(fimg))
         #display(postprocess(g))
-        save(@sprintf("_grad.%04d.jpg",iter),postprocess(g))
+        save(@sprintf("_grad.%04d.jpg",iter),toimg(g))
     end
 end
 
