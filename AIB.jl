@@ -19,6 +19,8 @@ include(Pkg.dir("Knet","data","imagenet.jl"))  #imagenet.jl includes matconvnet 
 
 using AutoGrad
 
+using LinearAlgebra  # if using axpy!
+
 #Define the type functions
 #cpu_type = Array{Float64}
 if gpu()>-1
@@ -54,7 +56,7 @@ Dict{String,Any} with 9 entries:
   "type"     => "conv"
 =#
 
-# this code from KnetML style transfer example
+# this function from KnetML style transfer example
 """
     Normalizes the input image by subtracting the mean of the network
     Inputs:
@@ -72,14 +74,10 @@ function img_normalize!(img, model_mean)
     return img
 end;
 
-# clamp!(::KnetArray{Float32,3}
-
-
-
 # convert from float array to rgb 8bit image
-function toimg(img, addmean=true)
+function toimg(img, addmean=true; verbose=false)
     fimg = convert(Array{Float32},img)   # size is (h,w,c,1)
-    println("toimg ",extrema(fimg))
+    verbose && println("toimg ",extrema(fimg))
     fimg = reshape(fimg, size(fimg)[1:end-1])   # drop the last dimension
     #println("fimg size",size(fimg))
     
@@ -87,7 +85,7 @@ function toimg(img, addmean=true)
         im_mean = Array{Float32}(averageImage ./ 255)
         im_mean = [0.5f0, 0.5f0, 0.5f0]   # simplify. The means are 0.485,0.457,0.407
         img_normalize!(fimg, -1*im_mean)
-        println("toimg addmean ",extrema(fimg))
+        verbose && println("toimg addmean ",extrema(fimg))
     end
     
     clamp!(fimg, 0.f0,1.f0)
@@ -106,23 +104,23 @@ end
 # Maybe the order of averageImage is backward? See the "permuteddims(macfix)" code in imgdata().
 # However fromimg/toimg are a round trip up to floating point
 # For now, use imagenet.imgdata() to load images from disk, and use these routines subsequently.
-function fromimg(img, demean=true) 
+function fromimg(img, demean=true; verbose=false) 
     # img: size (h,w) type RGB
     img1 = channelview(img)  # size (3,h,w)
     img2 = permutedims(channelview(img1),[2,3,1])  # size (w,h,3)
     fimg1 = convert(Array{Float32},img2)	# size (h,w,3),  typeof Array{Float32,3}
-    println("fromimg ",extrema(fimg1))
+    verbose && println("fromimg ",extrema(fimg1))
     #println("fimg1 size",size(fimg1))
     
     if demean
         im_mean = Array{Float32}(averageImage ./ 255)
         im_mean = [0.5f0, 0.5f0, 0.5f0]
         img_normalize!(fimg1, im_mean)
-        println("toimg addmean ",extrema(fimg1))        
+        verbose && println("toimg addmean ",extrema(fimg1))        
     end
     
     fimg = reshape(fimg1, size(fimg1,1), size(fimg1,2), size(fimg1,3), 1) # add singleton dim
-    println("...fromimg ",extrema(fimg))
+    verbose && println("...fromimg ",extrema(fimg))
     convert(dtype,fimg)  # back to knetarray
 end
 
@@ -262,7 +260,7 @@ function get_convnet(weights, operations, derivatives, skip_fc=false)
     println("get_convnet derivatives=",length(derivatives)," ",derivatives)
 
     function convnet(xs,verbose=false)
-        println("convnet xs=",xs," skip_fc=",skip_fc," verbose=",verbose)
+        verbose && println("convnet xs=",xs," skip_fc=",skip_fc," verbose=",verbose)
         outputs = []
         i, j = 1, 1
         num_weights, num_operations = length(weights), length(operations)
@@ -273,8 +271,8 @@ function get_convnet(weights, operations, derivatives, skip_fc=false)
                 xs = forw(xs, operations[i], weights[j])
                 j += 1
             else
-                if verbose   println(i,"   ",operations[i])   end
                 xs = forw(xs, operations[i])
+                if verbose   println(i,"   ",operations[i], " ",size(xs))   end
             end
 
             if operations[i] == "relu"
@@ -335,9 +333,10 @@ convnet = get_convnet(params...,true)
 # 224 is 14*(2^4), i.e. divide 224 by 2 4 times, gives an exact even number resulting in 14
 # similarly 304=19*(2^4),  320=20*16
 #img = dtype(randn(224,224,3,1))  # works
-img = dtype(randn(320,320,3,1))  # seems like 224 is the only size that works
+# 400 = 25*16
+_img = dtype(randn(224,224,3,1))    # dummy image needed for printing the network
 #img = dtype(randn(112,112,3,1))
-prediction,features = convnet(img,true)
+prediction,features = convnet(_img,true)
 
 #=  working version, image size (224,224,3,1)
 convnet xs=K32(224,224,3,1)[0.59703636⋯]
@@ -356,7 +355,7 @@ calling conv4 size(w[1])=(3, 3, 512, 512) size(x)=(14, 14, 512, 1) => rval size 
 calling conv4 size(w[1])=(3, 3, 512, 512) size(x)=(14, 14, 512, 1) => rval size (14, 14, 512, 1)
 =#
 
-#= dimensions that fail
+#= dimensions that fail ... indeed, yes it was FC layers at end causing the problem
 convnet xs=K32(320,320,3,1)[-1.3820721⋯]
 calling conv4 size(w[1])=(3, 3, 3, 64) size(x)=(320, 320, 3, 1) => rval size (320, 320, 64, 1)
 calling conv4 size(w[1])=(3, 3, 64, 64) size(x)=(320, 320, 64, 1) => rval size (320, 320, 64, 1)
@@ -375,7 +374,7 @@ calling conv4 size(w[1])=(3, 3, 512, 512) size(x)=(20, 20, 512, 1) => rval size 
 
 function mkreludictionary()
     reludict = -1 * ones(Int32,29)  # index from desired relu back to featuremap index
-    prediction, features = convnet(img)
+    prediction, features = convnet(_img)
     println("CORRESPONDENCE of feature# and pytorch relu:")
     for ifeat = 1:length(features)
         irelu = features[ifeat][1]-1
@@ -389,20 +388,57 @@ ReluDict = mkreludictionary()
 @assert ReluDict[13]==6
 
 function loss(img)
+    compatscale = 64.f0*size(img,1)*size(img,2)   # poor choice but compatible with nips17 experiment naming
     prediction,features = convnet(img)
     relu = features[6][2]
-    -sum(relu .* relu)
+    -sum(relu .* relu) / compatscale
+end
+
+function PROBELOSS(img)
+    prediction,features = convnet(img)
+    #layers = [11,13]
+    layers = [13]
+    theloss = 0.f0
+    
+    _feat = features[ReluDict[layers[1]]][2]   # poor choice but compatible with nips17 experiment naming
+    println("size(_feat)=",size(_feat))
+    compatscale = reduce(*,size(_feat))   # should be recomputed per layer
+    println("compatscale=",compatscale)
+    
+    for irelu in layers
+        println("looping irelu=",irelu)
+        ifeat = ReluDict[irelu]
+        @assert ifeat > 0
+        relu = features[ifeat][2]
+        println("features[ifeat,1]=",features[ifeat][1]," iRelu=",irelu," -> ","ifeat=",ifeat)
+        println("size(feat)=",size(relu), " typeof=",typeof(relu))
+        frelu = convert(Array{Float32},relu)
+        println("extrema=",extrema(frelu))
+        theloss1 = sum(relu .* relu)
+        theloss1 /= compatscale
+        println("theloss=",theloss1)
+        println("f theloss=", sum(frelu .* frelu)/compatscale)
+        theloss -= theloss1
+    end
+    theloss
 end
 
 function loss(img)
     prediction,features = convnet(img)
-    layers = [11,13]
+    #layers = [11,13]
+    layers = [13]
     theloss = 0.f0
+    
+    _feat = features[ReluDict[layers[1]]][2]   # poor choice but compatible with nips17 experiment naming
+    compatscale = reduce(*,size(_feat))   # should be recomputed per layer
+    
     for irelu in layers
         ifeat = ReluDict[irelu]
         @assert ifeat > 0
         relu = features[ifeat][2]
-        theloss -= sum(relu .* relu)
+        theloss1 = sum(relu .* relu)
+        theloss1 /= compatscale
+        theloss -= theloss1
     end
     theloss
 end
@@ -410,45 +446,96 @@ end
 # redefine non-verbose version
 convx(x,w) = conv4(w[1], x; padding=1, mode=1) .+ w[2]
 
-gBlur = 10
+
+gDisplayIter = 100
+gBlur = -1
+gLr = 1.f0
 
 fimg = copy(image)     # image is original, img is evolved
 fimg = dtype(randn(size(image)))  #gaussian noise (mean:0, var:1)
 fimg = dtype(randn(400,400,3,1))
+fimg = dtype(randn(224,224,3,1))
+
 #fimg = Param(fimg)
 imgdisp = toimg(fimg)
 display(imgdisp)
 
-for iter=1:50
-    println("iteration ",iter)
+for iter=1:1001
+    verboseiter = (iter%10)==0
+    verboseiter && println("iteration ",iter)
+    
     fimg = Param(fimg)
     dloss = @diff loss(fimg)
+    println("typeof dloss=",typeof(dloss))
     g = grad(dloss,fimg)
-    #Base.axpy!(-0.01, g, img)
+    #LinearAlgebra.axpy!(-gLr, g, fimg) # does not work for knetarray
     #@. img += -0.0001 * g
-    fimg .+= -0.000005f0 * g
-    #img = clamp.(img, -0.5f0, 0.5f0)
+    #fimg .+= -gLr * g
+    update!(fimg, g, SGD(lr=gLr)) # does not work. no method matching length(::SGD)
     
-    iimg = toimg(fimg)  # clamps it
-    if iter%gBlur == 0
+    verboseiter && println(" loss=",value(dloss))
+    
+    
+    blurtime = (gBlur > 0) && ((iter % gBlur)==0)
+    #println("gBlur=",gBlur," iter%gBlur=",(iter % gBlur)," blurtime = ",blurtime)
+    iimg = toimg(fimg, verbose=blurtime)  # clamps it
+    if blurtime
         println("blurring")
         iimg = imfilter(iimg, Kernel.gaussian(3));
-        # todo re-expand also
+        iimg = imadjustintensity(iimg) # expands to 0,1 range
     end
-    fimg = fromimg(iimg)
+    fimg = fromimg(iimg,verbose=blurtime)
     
     #img = imgclamp(img)
     
-    if (iter-1)%5 == 0
+    if (iter-1)%gDisplayIter == 0
         println("typeof(img)=",typeof(fimg)," typeof g=",typeof(g))
         println("img in ",minimum(fimg),"..",maximum(fimg), "  g in ", minimum(g),"..",maximum(g)) # todo extrema not defined for knetarray
-        display(toimg(fimg))
+        display(toimg(fimg,verbose=true))
         #map(clamp01nan, img)
         save(@sprintf("_output.%04d.jpg",iter),toimg(fimg))
         #display(postprocess(g))
         save(@sprintf("_grad.%04d.jpg",iter),toimg(g))
     end
 end
+
+# gradient check.  
+# Generally obtains correlation of ~0.95 between single-pixel loss increment and approximation of + grad*eps
+import Random
+Random.seed!(101)
+junkimg = dtype(randn(400,400,3,1));
+junkimg = Param(junkimg)
+AutoGrad.gcheck(loss,junkimg; verbose=2, nsample=10, delta=0.1)
+println("")
+_dloss = @diff loss(junkimg)
+_g = grad(_dloss,junkimg);
+
+function vnorm(v)
+    v .-= sum(v) / length(v)
+    v ./= norm(v)
+end
+
+for jj=200:210
+    vdiff = []  # record some differentials
+    vval = []   # record some value differences
+  for ii=10:390 
+    thegrad = _g[jj,ii,2,1]   # =>  0.0031
+    if abs(thegrad) < 0.006  continue;  end
+    junkimg[jj,ii,2,1]  # -0.986
+    L1 = loss(junkimg)  # -249.1141f0
+    junkeps = 1.f0
+    junkimg[jj,ii,2,1] += junkeps
+    L2 = loss(junkimg)  # -249.1113f0
+    valdiff = L2 - L1   # 0.0028076172f0
+    differential = _g[jj,ii,2,1] * junkeps
+    println("obtained=",valdiff, " vs grad*eps = ", differential)
+    append!(vval,valdiff)
+    append!(vdiff,differential)
+  end
+  println("correlation = ", sum(vnorm(vdiff) .* vnorm(vval)))
+end
+
+
 
 
 
