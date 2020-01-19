@@ -377,6 +377,7 @@ calling conv4 size(w[1])=(3, 3, 512, 512) size(x)=(20, 20, 512, 1) => rval size 
 function mkreludictionary()
     # for VGG16: dimension 29; for VGG19: dimension 35.
     reludict = -1 * ones(Int32,35)  # index from desired relu back to featuremap index
+#    reludict = -1 * ones(Int32,29)  # index from desired relu back to featuremap index
     prediction, features = convnet(_img)
     println("CORRESPONDENCE of feature# and pytorch relu:")
     for ifeat = 1:length(features)
@@ -402,7 +403,6 @@ function PROBELOSS(img)
     #println("img 50,50,: ",tmpimg[50,50,1:3,1], " 51,51,: ", tmpimg[51,51,1:3,1])
 
     prediction,features = convnet(img)
-        
     #layers = [11,13]
     layers = [13]
     theloss = 0.f0
@@ -453,6 +453,7 @@ end
 # redefine non-verbose version
 convx(x,w) = conv4(w[1], x; padding=1, mode=1) .+ w[2]
 
+
 # comparison 
 # python AIBsynth.py --imgsize 400 --save_iter 100 --niter 1001  --layers 11 13  --outfile _AIB_relu_11_13_%04d.png
 # python AIBsynth.py --imgsize 400 --save_iter 50 --niter 1001 --blur_iter 100 --layers 11 13  --outfile _AIB_bl_100_relu_11_13__%04d.png
@@ -484,12 +485,12 @@ imgdisp = load("_startingimg.png")
 fimg = fromimg(imgdisp)
 display(imgdisp)
 
-
 for iter=1:1001
     verboseiter = (iter%10)==0
     verboseiter && println("iteration ",iter)
     
     fimg = Param(fimg)
+
     dloss = @diff loss(fimg)  # typeof(dloss) = AutoGrad.Tape 
     g = grad(dloss,fimg)
     #LinearAlgebra.axpy!(-gLr, g, fimg) # Linalg version does not work for knetarray
@@ -498,7 +499,6 @@ for iter=1:1001
     #update!(fimg, g, SGD(lr=gLr)) # does not work. no method matching length(::SGD)
     
     verboseiter && println(" loss=",value(dloss))
-    
     
     blurtime = (gBlur > 0) && ((iter % gBlur)==0)
     #println("gBlur=",gBlur," iter%gBlur=",(iter % gBlur)," blurtime = ",blurtime)
