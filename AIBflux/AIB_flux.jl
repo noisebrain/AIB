@@ -1,9 +1,9 @@
 # add Flux,Metalhead,BSON packages
 # add CuArrays to get GPU support
-cd("../zilla/P/N/Aesthetics/ArtInverseBrain17/SynthJulia/AIBflux")
+#cd("../zilla/P/N/Aesthetics/ArtInverseBrain17/SynthJulia/AIBflux")
 pwd()
 using Pkg
-Pkg.activate(".")  # pick up Flux v0.10.0
+#Pkg.activate(".")  # pick up Flux v0.10.0
 
 using Flux
 #using Metalhead
@@ -13,9 +13,8 @@ Pkg.installed()["Flux"]  # v0.9.0
 using BSON
 using BSON: @load
 
-using Images #AbstractRGB
+using Images, ImageMagick #AbstractRGB
 
-W = BSON.load("vgg19.bson")
 
 F = Float32
 
@@ -85,6 +84,7 @@ function vgg19_layers()
 end
 =# #EXAMPLECODE
 
+
 # FROM METALHEAD
 function vgg19_layers(ws)
   #ws = weights("vgg19.bson")
@@ -116,7 +116,7 @@ function vgg19_layers(ws)
     Dense(ws[:fc7_w_0]', ws[:fc7_b_0], relu),
     Dropout(0.5f0),
     Dense(ws[:fc8_w_0]', ws[:fc8_b_0]),
-    softmax)
+    softmax) |> gpu
   #Flux.testmode!(ls)  # put batchnorm,etc into test mode
   return ls
 end	# vgg19_layers FROM METALHEAD
@@ -155,8 +155,11 @@ function preprocess(im::AbstractMatrix{<:AbstractRGB})
   # Convert to channel view and normalize (these coefficients taken
   # from PyTorch's ImageNet normalization code)
   μ = [0.485, 0.456, 0.406]
+  # the sigma numbers are suspect: they cause the image to go outside of 0..1
+  # 1/0.225 = 4.4 effective scale
   σ = [0.229, 0.224, 0.225]
-  im = (channelview(im) .- μ)./σ
+  #im = (channelview(im) .- μ)./σ
+  im = (channelview(im) .- μ)
 
   # Convert from CHW (Image.jl's channel ordering) to WHCN (Flux.jl's ordering)
   # and enforce Float32, as that seems important to Flux
@@ -183,7 +186,8 @@ function toimg(img, addmean=true; verbose=false)
         #img_normalize!(fimg, -1*im_mean)
         μ = [0.485, 0.456, 0.406]
         σ = [0.229, 0.224, 0.225]
-        fimg = fimg .* σ .+ μ
+        #fimg = fimg .* σ .+ μ
+        fimg = fimg .+ μ
         verbose && println("toimg addmean ",extrema(fimg))
     end
 
@@ -304,17 +308,22 @@ function layerlookup()
     else
       lookup[i] = -1
     end
+    println(i," iilayer=",iilayer," lookup=",lookup[i])
   end
   lookup
 end
 
-const PytorchReluLayers = [ 1,3,6,8,11,13,15,17,20,22,24,26,29,31,33 ]
-const FluxReluLayers    = [ 1,2,4,5, 7, 8, 9,10,12,13,14,15,17,18,19 ]
 
+# DEBUGGING CELL 
+#const PytorchReluLayers = [ 1,3,6,8,11,13,15,17,20,22,24,26,29,31,33 ]
+#const FluxReluLayers    = [ 1,2,4,5, 7, 8, 9,10,12,13,14,15,17,18,19 ]
+const PytorchReluLayers = convert(Array{Int32},[ 1,3,6,8,11,13,15,17,20,22,24,26,29,31,33 ])
+const FluxReluLayers    = convert(Array{Int32},[ 1,2,4,5, 7, 8, 9,10,12,13,14,15,17,18,19 ])
 const LayerLookup = layerlookup()
 
+
 function aibeval(im,ptlayers, chain,PytorchReluLayers,FluxReluLayers,verbose=false) # pass in chain also?
-  @assert length(FluxReluLayers)==15 && length(FluxReluLayers) == length(PytorchReluLayers)
+  #@assert length(FluxReluLayers)==15 && length(FluxReluLayers) == length(PytorchReluLayers)
   sumloss = F(0.)
   scale = F(1.)
   activ = im
@@ -346,34 +355,119 @@ function aibeval(im,ptlayers, chain,PytorchReluLayers,FluxReluLayers,verbose=fal
 end
 
 
-
+W = BSON.load("vgg19.bson")
 chain = vgg19_layers(W)
-img = load("cat.jpg")
+#img = load("cat.jpg")
 img = load("_startingimg.png")
 imorg = preprocess(img)	# size is (224, 224, 3, 1)
 display(toimg(imorg))
 #chain = vgg19_layers(W)
-println(extrema(imorg))
+println("extrema(imorg)=",extrema(imorg))
 
 
-imx = copy(imorg)
+imx = copy(imorg) |> gpu
 #theloss = mkloss([13])
 #daibeval(im) = gradient(aibeval,im,xlayers,p,q,r)[1]
 for iter=1:100
-  println("\niter = ",iter)
-  display(toimg(imx))
+    println("\niter = ",iter)
+    display(toimg(cpu(imx)))
     global imx
+    imx = gpu(imx)  # without this, it stalls on the seocnd iteration
     #thegrad = gradient(aibeval,im,[13])[1]      # thegrad = nothing
-    thegrad = gradient(imx->aibeval(imx,[13],chain,PytorchReluLayers,FluxReluLayers),imx)[1]
+    thegrad = gradient(imx->aibeval(imx,[13],chain,PytorchReluLayers,FluxReluLayers,false),imx)[1]
     #print("thegrad = ",thegrad)
-    println("thegrad shape = ",size(thegrad))
+    #println("thegrad shape = ",size(thegrad))
+    
+    # todo check whether on GPU before/after this!
     imx = imx .- 0.001 .* thegrad
 
     # TODO blur, clamp
     
     if (iter-1)%10==0
-      println(iter, " extrema ", extrema(imx));
-      display(toimg(imx))
+      println(iter, " extrema ", extrema(cpu(imx)))
+      display(toimg(cpu(imx)))
       #display(toimg(thegrad))
     end
 end
+
+
+
+function aibevalDBG(im,ptlayers, chain,PytorchReluLayers,FluxReluLayers,verbose=false) # pass in chain also?
+  @assert length(FluxReluLayers)==15 && length(FluxReluLayers) == length(PytorchReluLayers)
+  sumloss = F(0.)
+  scale = F(1.)
+    f1size = 802816.
+  activ = im
+  for ilayer=1:15
+    println("\nchecking ilayer ",ilayer)
+    layer = chain.layers[ilayer]
+    activ = layer(activ)
+    ptlayer = LayerLookup[ilayer]
+
+    if verbose let
+        _iilayer = findindex(ilayer,FluxReluLayers)
+        if _iilayer != -1
+          _ptlayer = PytorchReluLayers[_iilayer]
+          println("ilayer -> iilayer -> ptlayer ",ilayer," ",_iilayer," ",_ptlayer)
+        else
+          _ptlayer = -1
+        end
+        @assert ptlayer == _ptlayer
+      end
+      println("ptlayer ",ptlayer," of interest? ", ptlayer in ptlayers)
+    end
+
+    if ptlayer in ptlayers
+        println("adding loss at layer ",ptlayer)
+        println("f1.shape=",size(activ))
+        sumloss -= scale * sum(activ .* activ)
+        println("f1 norm2 ",norm(activ)/f1size,", f1 min,max = ",extrema(activ))
+    end
+  end
+  println("energy1 = ", sumloss / f1size)
+  sumloss
+end #DEBUG
+
+
+# debugging cell
+using LinearAlgebra
+
+W = BSON.load("vgg19.bson")
+chain = vgg19_layers(W)
+#img = load("cat.jpg")
+img = load("_startingimg.png")
+imorg = preprocess(img)	# size is (224, 224, 3, 1)
+display(toimg(imorg))
+#chain = vgg19_layers(W)
+println("DEBUGGING...")
+println("size(imorg)=",size(imorg))
+println("extrema(imorg)=",extrema(imorg))
+println("norm(imorg)=",norm(imorg))
+
+let
+    imx = copy(imorg)
+    #theloss = mkloss([13])
+    #daibeval(im) = gradient(aibeval,im,xlayers,p,q,r)[1]
+    imx = gpu(imx)
+    for iter=1:100
+        println("\niter = ",iter)
+        #global imx
+
+        #thegrad = gradient(aibeval,im,[13])[1]      # thegrad = nothing
+        thegrad = gradient(imx->aibevalDBG(imx,[13],chain,PytorchReluLayers,FluxReluLayers),imx)[1]
+        #print("thegrad = ",thegrad)
+        println("thegrad shape = ",size(thegrad))
+        imx = imx .- 0.001 .* thegrad
+        
+        if (iter-1)%1==0
+            println(iter, " imx extrema ", extrema(imx));
+            display(toimg(imx))
+            if iter>1  display(toimg(thegrad))   end
+        end
+
+        # TODO blur, clamp
+
+    end
+end # debugging
+
+
